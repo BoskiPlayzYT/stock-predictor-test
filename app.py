@@ -32,50 +32,50 @@ def fetch_price_data(symbol: str, months: int) -> pd.DataFrame:
 # --- Fetch fundamentals and news ---
 def fetch_financials(symbol: str):
     ticker = yf.Ticker(symbol)
-    rev = None; earn = None
+    rev_val = None
+    next_earn = None
     try:
         info = ticker.info
         rev = info.get('totalRevenue')
         if rev:
-            rev = rev / 1e9
+            rev_val = rev / 1e9
     except:
-        rev = None
+        pass
     try:
         cal = ticker.calendar
-        earn = cal.loc['Earnings Date'][0]
+        next_earn = cal.loc['Earnings Date'][0]
     except:
-        earn = None
-    return rev, earn
+        pass
+    return rev_val, next_earn
 
-# Safely fetch news headlines and sentiment
+# Safe news and sentiment fetch
 def fetch_news_and_sentiment(symbol: str, count:int=5):
     analyzer = SentimentIntensityAnalyzer()
-    ticker = yf.Ticker(symbol)
     try:
-        news_items = ticker.news[:count]
+        news_items = yf.Ticker(symbol).news[:count]
     except:
         news_items = []
     results = []
     for article in news_items:
-        title = article.get('title') or ''
-        link = article.get('link') or ''
-        if not title or not link:
-            continue
-        score = analyzer.polarity_scores(title)['compound']
-        results.append({'title': title, 'link': link, 'sentiment': score})
+        title = article.get('title', '')
+        link = article.get('link', '')
+        if title and link:
+            score = analyzer.polarity_scores(title)['compound']
+            results.append({'title': title, 'link': link, 'sentiment': score})
     avg_sent = np.mean([r['sentiment'] for r in results]) if results else 0.0
     return results, avg_sent
 
-# --- Monte Carlo via Geometric Brownian Motion ---
+# Monte Carlo via GBM
 def monte_carlo(S0, mu, sigma, days, sims):
     dt = 1/252
-    paths = np.zeros((sims, days+1)); paths[:,0] = S0
+    paths = np.zeros((sims, days+1))
+    paths[:,0] = S0
     for t in range(1, days+1):
         Z = np.random.standard_normal(sims)
         paths[:,t] = paths[:,t-1] * np.exp((mu - 0.5*sigma**2)*dt + sigma * np.sqrt(dt) * Z)
     return paths
 
-# --- User Interface ---
+# --- Streamlit UI ---
 st.set_page_config(page_title="AI Stock Predictor", layout="wide")
 st.markdown("""
 <style>
@@ -85,6 +85,7 @@ st.markdown("""
   .stMetric > div {color: #fff !important;}
 """, unsafe_allow_html=True)
 
+# Sidebar inputs
 st.sidebar.title("Controls")
 symbol = st.sidebar.text_input("Ticker", "AAPL").upper()
 months = st.sidebar.slider("History (months)", 1, 24, 6)
@@ -92,77 +93,90 @@ sims = st.sidebar.slider("Monte Carlo Sims", 100, 5000, 1000)
 others = st.sidebar.multiselect("Additional tickers for news", ["MSFT","AMZN","GOOG","TSLA"], default=["MSFT","AMZN"])
 
 if st.sidebar.button("Run"):
-    # Fetch price data
+    # Price data
     df = fetch_price_data(symbol, months)
     if df.empty:
         st.error(f"No data for {symbol}")
         st.stop()
 
-    # Fetch fundamentals and news sentiment
+    # Fundamentals & news
     revenue, next_earn = fetch_financials(symbol)
     news_list, news_sent = fetch_news_and_sentiment(symbol)
 
-    # Technical indicators
+    # Technicals
     df['MA20'] = df['Close'].rolling(20).mean()
     df['MA50'] = df['Close'].rolling(50).mean()
 
-    # Calculate returns and Monte Carlo parameters
+    # Monte Carlo parameters
     log_ret = np.log(df.Close/df.Close.shift(1)).dropna()
     mu = log_ret.mean()*252 + news_sent*0.1
     sigma = log_ret.std()*np.sqrt(252)
     S0 = df.Close.iloc[-1]
 
-    # Run Monte Carlo simulation
-    paths = monte_carlo(S0, mu, sigma, 30, sims)
+    # Run Monte Carlo
+    days = 30
+    paths = monte_carlo(S0, mu, sigma, days, sims)
     median = np.median(paths, axis=0)
+    p10 = np.percentile(paths, 10, axis=0)
+    p90 = np.percentile(paths, 90, axis=0)
     up5 = (paths[:,-1] > S0*1.05).mean()*100
     down5 = (paths[:,-1] < S0*0.95).mean()*100
     bias = up5 - down5
     rec = ('Strong Buy' if bias>40 else 'Buy' if bias>20 else 'Hold' if bias>-20 else 'Sell' if bias>-40 else 'Strong Sell')
 
-    # Display header metrics
+    # Header metrics
     st.markdown(f"## {symbol} — {rec} ({bias:.1f}% bias)")
-    c1, c2, c3, c4 = st.columns(4)
+    c1,c2,c3,c4 = st.columns(4)
     c1.metric("Price", f"${S0:.2f}")
     c2.metric("Revenue (B)", f"{revenue:.2f}" if revenue else "N/A")
     c3.metric("News Sentiment", f"{news_sent:+.2f}")
     if next_earn: c4.metric("Next Earnings", next_earn.date())
 
-    # Prepare chart dataset
-    fut_dates = pd.date_range(df.index[-1], periods=31, freq='D')
+    # Chart data
+    fut_dates = pd.date_range(df.index[-1], periods=days+1, freq='D')
     chart_df = pd.DataFrame({
         'date': np.concatenate([df.index.values, fut_dates.values]),
-        'Price': np.concatenate([df.Close.values, [None]*31]),
-        'MA20': np.concatenate([df.MA20.values, [None]*31]),
-        'MA50': np.concatenate([df.MA50.values, [None]*31]),
-        'Forecast': np.concatenate([[None]*len(df), median])
+        'Price': np.concatenate([df.Close.values, [None]*(days+1)]),
+        'MA20': np.concatenate([df.MA20.values, [None]*(days+1)]),
+        'MA50': np.concatenate([df.MA50.values, [None]*(days+1)]),
+        'Forecast': np.concatenate([[None]*len(df), median]),
+        'P10': np.concatenate([[None]*len(df), p10]),
+        'P90': np.concatenate([[None]*len(df), p90])
     })
 
-    # Build interactive Altair chart
+    # Altair chart
     base = alt.Chart(chart_df).encode(x='date:T')
+    band = base.mark_area(color='#ff7f0e', opacity=0.2).encode(y='P10:Q', y2='P90:Q')
     price_line = base.mark_line(color='#1f77b4', strokeWidth=2).encode(y='Price:Q')
     ma20_line = base.mark_line(color='#2ca02c', strokeDash=[5,5]).encode(y='MA20:Q')
     ma50_line = base.mark_line(color='#d62728', strokeDash=[2,2]).encode(y='MA50:Q')
     forecast_line = base.mark_line(color='#ff7f0e', strokeDash=[4,4], strokeWidth=2).encode(y='Forecast:Q')
-    band = base.mark_area(color='#ff7f0e', opacity=0.2).encode(y='Forecast:Q', y2='Forecast:Q')
     chart = alt.layer(band, price_line, ma20_line, ma50_line, forecast_line)
     chart = chart.properties(width='container', height=400)
+    chart = chart.configure_axis(labelColor='white', titleColor='white')
+    chart = chart.configure_legend(labelColor='white', titleColor='white')
     st.altair_chart(chart, use_container_width=True)
 
     # Main stock news
     st.markdown(f"## Recent News for {symbol}")
-    news_df = pd.DataFrame(news_list)
-    news_df['Headline'] = news_df.apply(lambda r: f"[{r.title}]({r.link})", axis=1)
-    st.table(news_df[['Headline','sentiment']].rename(columns={'sentiment':'Sentiment'}))
+    if news_list:
+        news_df = pd.DataFrame(news_list)
+        news_df['Headline'] = news_df.apply(lambda r: f"[{r['title']}]({r['link']})", axis=1)
+        st.table(news_df[['Headline','sentiment']].rename(columns={'sentiment':'Sentiment'}))
+    else:
+        st.write("No recent news available.")
 
     # News for other tickers
     st.markdown("## News for Others")
     for o in others:
         st.markdown(f"### {o}")
-        ol, os = fetch_news_and_sentiment(o)
-        odf = pd.DataFrame(ol)
-        odf['Headline'] = odf.apply(lambda r: f"[{r.title}]({r.link})", axis=1)
-        st.table(odf[['Headline','sentiment']].rename(columns={'sentiment':'Sentiment'}))
+        ol, osent = fetch_news_and_sentiment(o)
+        if ol:
+            odf = pd.DataFrame(ol)
+            odf['Headline'] = odf.apply(lambda r: f"[{r['title']}]({r['link']})", axis=1)
+            st.table(odf[['Headline','sentiment']].rename(columns={'sentiment':'Sentiment'}))
+        else:
+            st.write("No recent news available.")
 
     # Scenario probabilities
     st.markdown("## Scenario Probabilities")
