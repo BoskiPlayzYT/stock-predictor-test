@@ -18,9 +18,11 @@ def fetch_price_data(symbol: str, months: int) -> pd.DataFrame:
         ticker += '.us'
     end_dt = datetime.now()
     start_dt = end_dt - timedelta(days=months * 30)
-    url = (f"https://stooq.com/q/d/l/?s={ticker}"
-           f"&d1={start_dt.strftime('%Y%m%d')}"
-           f"&d2={end_dt.strftime('%Y%m%d')}&i=d")
+    url = (
+        f"https://stooq.com/q/d/l/?s={ticker}"
+        f"&d1={start_dt.strftime('%Y%m%d')}"
+        f"&d2={end_dt.strftime('%Y%m%d')}&i=d"
+    )
     try:
         r = requests.get(url, timeout=10)
         df = pd.read_csv(StringIO(r.text), parse_dates=['Date'], index_col='Date')
@@ -62,8 +64,8 @@ def fetch_news_and_sentiment(symbol: str, count: int = 5):
         items = root.findall('.//item')[:count]
         analyzer = SentimentIntensityAnalyzer()
         for it in items:
-            title = it.find('title').text or ''
-            link = it.find('link').text or ''
+            title = (it.find('title').text or '').strip()
+            link = (it.find('link').text or '').strip()
             if title and link:
                 score = analyzer.polarity_scores(title)['compound']
                 results.append({'title': title, 'link': link, 'sentiment': score})
@@ -92,16 +94,17 @@ st.markdown("""
   .stMetric > div {color: #fff !important;}
 """, unsafe_allow_html=True)
 
-# Sidebar inputs
+# Sidebar
 st.sidebar.title("Controls")
 symbol = st.sidebar.text_input("Ticker", "AAPL").upper()
 months = st.sidebar.slider("History (months)", 1, 24, 6)
 sims = st.sidebar.slider("Monte Carlo Sims", 100, 5000, 1000)
-others = st.sidebar.multiselect("Other tickers for news",
-                               ["MSFT","AMZN","GOOG","TSLA"], default=["MSFT","AMZN"])
+others = st.sidebar.multiselect(
+    "Other tickers for news",
+    ["MSFT","AMZN","GOOG","TSLA"], default=["MSFT","AMZN"]
+)
 
 if st.sidebar.button("Run Prediction"):
-    # Fetch data
     df = fetch_price_data(symbol, months)
     if df.empty:
         st.error(f"No data for {symbol}")
@@ -109,7 +112,7 @@ if st.sidebar.button("Run Prediction"):
     revenue, next_earn = fetch_financials(symbol)
     news_list, news_sent = fetch_news_and_sentiment(symbol)
 
-    # Technicals
+    # Technical indicators
     df['MA20'] = df['Close'].rolling(20).mean()
     df['MA50'] = df['Close'].rolling(50).mean()
 
@@ -120,7 +123,7 @@ if st.sidebar.button("Run Prediction"):
     S0 = df.Close.iloc[-1]
     days = 30
 
-    # Simulate paths
+    # Simulations
     paths = monte_carlo(S0, mu, sigma, days, sims)
     median = np.median(paths, axis=0)
     p10 = np.percentile(paths, 10, axis=0)
@@ -128,7 +131,13 @@ if st.sidebar.button("Run Prediction"):
     up5 = (paths[:, -1] > S0 * 1.05).mean() * 100
     down5 = (paths[:, -1] < S0 * 0.95).mean() * 100
     bias = up5 - down5
-    rec = ('Strong Buy' if bias > 40 else 'Buy' if bias > 20 else 'Hold' if bias > -20 else 'Sell' if bias > -40 else 'Strong Sell')
+    rec = (
+        'Strong Buy' if bias > 40 else
+        'Buy' if bias > 20 else
+        'Hold' if bias > -20 else
+        'Sell' if bias > -40 else
+        'Strong Sell'
+    )
 
     # Header display
     st.markdown(f"## {symbol} — {rec} ({bias:.1f}% bias)")
@@ -136,7 +145,8 @@ if st.sidebar.button("Run Prediction"):
     c1.metric("Price", f"${S0:.2f}")
     c2.metric("Revenue (B)", f"{revenue:.2f}" if revenue else "N/A")
     c3.metric("News Sentiment", f"{news_sent:+.2f}")
-    if next_earn: c4.metric("Next Earnings", next_earn.date())
+    if next_earn:
+        c4.metric("Next Earnings", next_earn.date())
 
     # Prepare chart data
     fut_dates = pd.date_range(df.index[-1], periods=days + 1, freq='D')
@@ -150,50 +160,69 @@ if st.sidebar.button("Run Prediction"):
         'P90': np.concatenate([[np.nan] * len(df), p90])
     })
 
-    # Compute dynamic y-domain with padding
+    # Dynamic y-domain padding
     y_min = np.nanmin([chart_df['P10'].dropna().min(), df.Close.min()])
     y_max = np.nanmax([chart_df['P90'].dropna().max(), df.Close.max()])
-    rng = y_max - y_min
-    pad = 0.1 * rng
+    pad = 0.1 * (y_max - y_min)
     y_scale = alt.Scale(domain=[y_min - pad, y_max + pad])
 
     # Melt for legend
-    lines = chart_df.melt('date', ['Price', 'MA20', 'MA50', 'Forecast'], var_name='Series', value_name='Value')
+    lines = chart_df.melt(
+        'date', ['Price', 'MA20', 'MA50', 'Forecast'],
+        var_name='Series', value_name='Value'
+    )
 
-    # Selection for crosshair
-    sel = alt.selection_single(fields=['date'], nearest=True, on='mouseover', empty='none')
-
+    # Crosshair selection
+    sel = alt.selection_single(
+        fields=['date'], nearest=True,
+        on='mouseover', empty='none'
+    )
     base = alt.Chart(lines).encode(x='date:T')
-    band = alt.Chart(chart_df).mark_area(color='#ff7f0e', opacity=0.2).encode(
-        x='date:T', y='P10:Q', y2='P90:Q')
+    band = alt.Chart(chart_df).mark_area(
+        color='#ff7f0e', opacity=0.2
+    ).encode(
+        x='date:T', y='P10:Q', y2='P90:Q'
+    )
     series = base.mark_line().encode(
         y=alt.Y('Value:Q', scale=y_scale),
-        color=alt.Color('Series:N', scale=alt.Scale(domain=['Price','MA20','MA50','Forecast'],
-                                                  range=['#1f77b4','#2ca02c','#d62728','#ff7f0e'])),
-        strokeDash=alt.condition(
-            alt.datum.Series=='MA20', alt.value([5,5]),
-            alt.condition(alt.datum.Series=='MA50', alt.value([2,2]), alt.value([ ]))
-        ),
-        strokeWidth=alt.condition(alt.datum.Series=='Forecast', alt.value(2), alt.value(1.5))
+        color=alt.Color(
+            'Series:N',
+            scale=alt.Scale(
+                domain=['Price','MA20','MA50','Forecast'],
+                range=['#1f77b4','#2ca02c','#d62728','#ff7f0e']
+            )
+        )
     )
-    rule = base.mark_rule(color='white').encode(opacity=alt.condition(sel, alt.value(1), alt.value(0))).add_selection(sel)
+    rule = base.mark_rule(color='white').encode(
+        opacity=alt.condition(sel, alt.value(1), alt.value(0))
+    ).add_selection(sel)
     tooltip = base.mark_point(size=0).encode(
         opacity=alt.value(0),
-        tooltip=[alt.Tooltip('date:T', title='Date'),
-                 alt.Tooltip('Value:Q', title='Value'),
-                 alt.Tooltip('Series:N', title='Series')]
+        tooltip=[
+            alt.Tooltip('date:T', title='Date'),
+            alt.Tooltip('Value:Q', title='Value'),
+            alt.Tooltip('Series:N', title='Series')
+        ]
     ).add_selection(sel)
 
-    chart = alt.layer(band, series, rule, tooltip).properties(width='container', height=400)
-    chart = chart.configure_axis(labelColor='white', titleColor='white')
-    chart = chart.configure_legend(labelColor='white', titleColor='white')
+    chart = alt.layer(band, series, rule, tooltip).properties(
+        width='container', height=400
+    )
+    chart = chart.configure_axis(
+        labelColor='white', titleColor='white'
+    ).configure_legend(
+        labelColor='white', titleColor='white'
+    )
     st.altair_chart(chart, use_container_width=True)
 
     # Main news
     st.markdown(f"## Recent News for {symbol}")
     if news_list:
         for item in news_list:
-            st.markdown(f"- [{item['title']}]({item['link']}) (Sentiment: {item['sentiment']:+.2f})")
+            st.markdown(
+                f"- [{item['title']}]({item['link']}) "
+                f"(Sentiment: {item['sentiment']:+.2f})"
+            )
     else:
         st.write("No recent news available.")
 
@@ -204,12 +233,19 @@ if st.sidebar.button("Run Prediction"):
         ol, osent = fetch_news_and_sentiment(o)
         if ol:
             for it in ol:
-                st.markdown(f"- [{it['title']}]({it['link']}) (Sentiment: {it['sentiment']:+.2f})")
+                st.markdown(
+                    f"- [{it['title']}]({it['link']}) "
+                    f"(Sentiment: {it['sentiment']:+.2f})"
+                )
         else:
             st.write("No recent news available.")
 
     # Scenario probabilities
     st.markdown("## Scenario Probabilities")
-    st.write(f"**Up >5%:** {up5:.1f}%  |  **Stable:** {100-up5-down5:.1f}%  |  **Down >5%:** {down5:.1f}%")
+    st.write(
+        f"**Up >5%:** {up5:.1f}%  |  "
+        f"**Stable:** {100-up5-down5:.1f}%  |  "
+        f"**Down >5%:** {down5:.1f}%"
+    )
 
     st.success("Analysis complete!")
