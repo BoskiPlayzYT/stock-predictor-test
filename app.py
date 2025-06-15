@@ -157,7 +157,8 @@ if st.sidebar.button("Run Prediction"):
     # Y scale domain
     y_min = np.nanmin([chart_df['P10'].dropna().min(), df.Close.min()])
     y_max = np.nanmax([chart_df['P90'].dropna().max(), df.Close.max()])
-    y_scale = alt.Scale(domain=[y_min * 0.995, y_max * 1.005])
+        # Add $10 padding to top and bottom of y-axis
+    y_scale = alt.Scale(domain=[y_min - 10, y_max + 10])
 
     # Crosshair and tooltip
     sel = alt.selection_single(fields=['date'], nearest=True, on='mouseover', empty='none')
