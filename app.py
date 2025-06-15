@@ -152,6 +152,10 @@ if st.sidebar.button("Run Prediction"):
     })
 
     # Legend via fold
+    # Dynamic padding: 10% of range
+    rng = y_max - y_min
+    pad = rng * 0.1
+    y_scale = alt.Scale(domain=[y_min - pad, y_max + pad])
     lines = chart_df.melt('date', ['Price', 'MA20', 'MA50', 'Forecast'], var_name='Series', value_name='Value')
 
     # Y scale domain
