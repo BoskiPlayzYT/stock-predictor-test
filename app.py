@@ -160,11 +160,10 @@ if st.sidebar.button("Run Prediction"):
         'P90': np.concatenate([[np.nan] * len(df), p90])
     })
 
-    # Dynamic y-domain padding
+    # Fixed $10 padding on y-axis for focused view
     y_min = np.nanmin([chart_df['P10'].dropna().min(), df.Close.min()])
     y_max = np.nanmax([chart_df['P90'].dropna().max(), df.Close.max()])
-    pad = 0.1 * (y_max - y_min)
-    y_scale = alt.Scale(domain=[y_min - pad, y_max + pad])
+    y_scale = alt.Scale(domain=[y_min - 10, y_max + 10])
 
     # Melt for legend
     lines = chart_df.melt(
