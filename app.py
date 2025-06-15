@@ -9,6 +9,7 @@ import yfinance as yf
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import altair as alt
 from bs4 import BeautifulSoup
+import xml.etree.ElementTree as ET
 
 # --- Data Fetch via Stooq CSV with yfinance fallback ---
 def fetch_price_data(symbol: str, months: int) -> pd.DataFrame:
@@ -17,11 +18,7 @@ def fetch_price_data(symbol: str, months: int) -> pd.DataFrame:
         ticker += '.us'
     end_dt = datetime.now()
     start_dt = end_dt - timedelta(days=months * 30)
-    url = (
-        f"https://stooq.com/q/d/l/?s={ticker}"
-        f"&d1={start_dt.strftime('%Y%m%d')}"
-        f"&d2={end_dt.strftime('%Y%m%d')}&i=d"
-    )
+    url = f"https://stooq.com/q/d/l/?s={ticker}&d1={start_dt.strftime('%Y%m%d')}&d2={end_dt.strftime('%Y%m%d')}&i=d"
     try:
         r = requests.get(url, timeout=10)
         df = pd.read_csv(StringIO(r.text), parse_dates=['Date'], index_col='Date')
@@ -46,56 +43,38 @@ def fetch_financials(symbol: str):
     except:
         pass
     try:
-        cal = ticker.calendar
-        next_earn = cal.loc['Earnings Date'][0]
+        next_earn = ticker.calendar.loc['Earnings Date'][0]
     except:
         pass
     return rev_val, next_earn
 
-# --- Fetch news and sentiment ---
+# --- Fetch news and sentiment via Google News RSS ---
 def fetch_news_and_sentiment(symbol: str, count: int = 5):
-    analyzer = SentimentIntensityAnalyzer()
-    # Try yfinance news
-    results = []
+    url = f"https://news.google.com/rss/search?q={symbol}%20stock&hl=en-US&gl=US&ceid=US:en"
+    results, avg_sent = [], 0.0
     try:
-        items = yf.Ticker(symbol).news[:count]
-    except:
-        items = []
-    # Fallback to Yahoo Finance news page
-    if not items:
-        url = f"https://finance.yahoo.com/quote/{symbol}/news?p={symbol}"
-        try:
-            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-            soup = BeautifulSoup(r.text, 'html.parser')
-            cards = soup.select('li.js-stream-content h3 a')[:count]
-            items = []
-            for a in cards:
-                title = a.get_text()
-                link = a['href']
-                if link.startswith('/'): link = 'https://finance.yahoo.com' + link
-                items.append({'title': title, 'link': link})
-        except:
-            items = []
-    # Process headlines
-    for art in items:
-        title = art.get('title') or art.get('title', '')
-        link = art.get('link') or art.get('link', '')
-        if title and link:
+        r = requests.get(url, timeout=10)
+        root = ET.fromstring(r.content)
+        items = root.findall('.//item')[:count]
+        analyzer = SentimentIntensityAnalyzer()
+        for it in items:
+            title = it.find('title').text
+            link = it.find('link').text
             score = analyzer.polarity_scores(title)['compound']
             results.append({'title': title, 'link': link, 'sentiment': score})
-    avg_sent = np.mean([r['sentiment'] for r in results]) if results else 0.0
+        if results:
+            avg_sent = np.mean([r['sentiment'] for r in results])
+    except:
+        pass
     return results, avg_sent
 
-# --- Monte Carlo via Geometric Brownian Motion ---
+# --- Monte Carlo via GBM ---
 def monte_carlo(S0, mu, sigma, days, sims):
     dt = 1/252
     paths = np.zeros((sims, days + 1)); paths[:, 0] = S0
     for t in range(1, days + 1):
         Z = np.random.standard_normal(sims)
-        paths[:, t] = (
-            paths[:, t - 1] *
-            np.exp((mu - 0.5 * sigma ** 2) * dt + sigma * np.sqrt(dt) * Z)
-        )
+        paths[:, t] = paths[:, t - 1] * np.exp((mu - 0.5 * sigma ** 2) * dt + sigma * np.sqrt(dt) * Z)
     return paths
 
 # --- Streamlit App ---
@@ -108,7 +87,7 @@ st.markdown("""
   .stMetric > div {color: #fff !important;}
 """, unsafe_allow_html=True)
 
-# Sidebar
+# Sidebar inputs
 st.sidebar.title("Controls")
 symbol = st.sidebar.text_input("Ticker", "AAPL").upper()
 months = st.sidebar.slider("History (months)", 1, 24, 6)
@@ -116,11 +95,12 @@ sims = st.sidebar.slider("Monte Carlo Sims", 100, 5000, 1000)
 others = st.sidebar.multiselect("Other tickers for news", ["MSFT","AMZN","GOOG","TSLA"], default=["MSFT","AMZN"])
 
 if st.sidebar.button("Run Prediction"):
-    # Fetch data
     df = fetch_price_data(symbol, months)
     if df.empty:
         st.error(f"No data for {symbol}")
         st.stop()
+
+    # Fundamentals & sentiment
     revenue, next_earn = fetch_financials(symbol)
     news_list, news_sent = fetch_news_and_sentiment(symbol)
 
@@ -128,7 +108,7 @@ if st.sidebar.button("Run Prediction"):
     df['MA20'] = df['Close'].rolling(20).mean()
     df['MA50'] = df['Close'].rolling(50).mean()
 
-    # MC parameters
+    # Monte Carlo params
     log_ret = np.log(df.Close / df.Close.shift(1)).dropna()
     mu = log_ret.mean() * 252 + news_sent * 0.1
     sigma = log_ret.std() * np.sqrt(252)
@@ -151,7 +131,7 @@ if st.sidebar.button("Run Prediction"):
         'Strong Sell'
     )
 
-    # Header
+    # Header display
     st.markdown(f"## {symbol} — {rec} ({bias:.1f}% bias)")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Price", f"${S0:.2f}")
@@ -171,46 +151,34 @@ if st.sidebar.button("Run Prediction"):
         'P90': np.concatenate([[np.nan] * len(df), p90])
     })
 
-    # Line series for legend
-    line_df = chart_df.melt('date', ['Price', 'MA20', 'MA50', 'Forecast'], var_name='Series', value_name='Value')
+    # Legend via fold
+    lines = chart_df.melt('date', ['Price', 'MA20', 'MA50', 'Forecast'], var_name='Series', value_name='Value')
 
-    # Y-axis domain
-    min_val = min(chart_df['P10'].min(), df.Close.min())
-    max_val = max(chart_df['P90'].max(), df.Close.max())
-    y_scale = alt.Scale(domain=[min_val * 0.995, max_val * 1.005])
+    # Y scale domain
+    y_min = np.nanmin([chart_df['P10'].dropna().min(), df.Close.min()])
+    y_max = np.nanmax([chart_df['P90'].dropna().max(), df.Close.max()])
+    y_scale = alt.Scale(domain=[y_min * 0.995, y_max * 1.005])
 
-    # Selection for tooltip and crosshair
-    selector = alt.selection_single(fields=['date'], nearest=True, on='mouseover', empty='none')
-    base = alt.Chart(line_df).encode(x='date:T')
-    band = alt.Chart(chart_df).mark_area(color='#ff7f0e', opacity=0.2).encode(
-        x='date:T', y='P10:Q', y2='P90:Q')
-    lines = base.mark_line().encode(
+    # Crosshair and tooltip
+    sel = alt.selection_single(fields=['date'], nearest=True, on='mouseover', empty='none')
+    base = alt.Chart(lines).encode(x='date:T')
+    band = alt.Chart(chart_df).mark_area(color='#ff7f0e', opacity=0.2).encode(x='date:T', y='P10:Q', y2='P90:Q')
+    chart_lines = base.mark_line().encode(
         y=alt.Y('Value:Q', scale=y_scale),
-        color=alt.Color('Series:N', scale=alt.Scale(domain=['Price','MA20','MA50','Forecast'],
-                                                  range=['#1f77b4','#2ca02c','#d62728','#ff7f0e'])),
-        strokeDash=alt.condition(
-            alt.datum.Series=='MA20', alt.value([5,5]),
-            alt.condition(
-                alt.datum.Series=='MA50', alt.value([2,2]),
-                alt.condition(alt.datum.Series=='Forecast', alt.value([4,4]), alt.value([ ]))
-            )
-        ),
-        strokeWidth=alt.condition(alt.datum.Series=='Forecast', alt.value(2), alt.value(1.5))
+        color='Series:N'
     )
-    rule = base.mark_rule(color='white').encode(
-        opacity=alt.condition(selector, alt.value(1), alt.value(0))
-    ).add_selection(selector)
+    rule = base.mark_rule(color='white').encode(opacity=alt.condition(sel, alt.value(1), alt.value(0))).add_selection(sel)
     tooltip = base.mark_point(size=0).encode(
         opacity=alt.value(0),
         tooltip=[alt.Tooltip('date:T', title='Date'), alt.Tooltip('Value:Q', title='Value'), alt.Tooltip('Series:N', title='Series')]
-    ).add_selection(selector)
+    ).add_selection(sel)
 
-    chart = alt.layer(band, lines, rule, tooltip).properties(width='container', height=300)
+    chart = alt.layer(band, chart_lines, rule, tooltip).properties(width='container', height=300)
     chart = chart.configure_axis(labelColor='white', titleColor='white')
     chart = chart.configure_legend(labelColor='white', titleColor='white')
     st.altair_chart(chart, use_container_width=True)
 
-    # Main news
+    # News for main symbol
     st.markdown(f"## Recent News for {symbol}")
     if news_list:
         for item in news_list:
@@ -218,7 +186,7 @@ if st.sidebar.button("Run Prediction"):
     else:
         st.write("No recent news available.")
 
-    # Other tickers news
+    # News for others
     st.markdown("## News for Others")
     for o in others:
         st.markdown(f"### {o}")
