@@ -148,7 +148,7 @@ if st.sidebar.button("Run Prediction"):
     if next_earn:
         c4.metric("Next Earnings", next_earn.date())
 
-    # Prepare chart data
+        # Prepare chart data
     fut_dates = pd.date_range(df.index[-1], periods=days + 1, freq='D')
     chart_df = pd.DataFrame({
         'date': np.concatenate([df.index.values, fut_dates.values]),
@@ -178,11 +178,13 @@ if st.sidebar.button("Run Prediction"):
         on='mouseover', empty='none'
     )
     base = alt.Chart(lines).encode(x='date:T')
-    band = alt.Chart(chart_df).mark_area(
-        color='#ff7f0e', opacity=0.2
-    ).encode(
-        x='date:T', y='P10:Q', y2='P90:Q'
+    # Confidence band with y-scale
+    band = alt.Chart(chart_df).mark_area(color='#ff7f0e', opacity=0.2).encode(
+        x='date:T',
+        y=alt.Y('P10:Q', scale=y_scale),
+        y2='P90:Q'
     )
+    # Lines
     series = base.mark_line().encode(
         y=alt.Y('Value:Q', scale=y_scale),
         color=alt.Color(
@@ -193,9 +195,16 @@ if st.sidebar.button("Run Prediction"):
             )
         )
     )
-    rule = base.mark_rule(color='white').encode(
+    # Vertical crosshair
+    v_rule = base.mark_rule(color='white', size=1).encode(
         opacity=alt.condition(sel, alt.value(1), alt.value(0))
     ).add_selection(sel)
+    # Horizontal crosshair
+    h_rule = base.mark_rule(color='white', orient='horizontal', size=1).encode(
+        y='Value:Q',
+        opacity=alt.condition(sel, alt.value(1), alt.value(0))
+    )
+    # Tooltip
     tooltip = base.mark_point(size=0).encode(
         opacity=alt.value(0),
         tooltip=[
@@ -205,14 +214,11 @@ if st.sidebar.button("Run Prediction"):
         ]
     ).add_selection(sel)
 
-    chart = alt.layer(band, series, rule, tooltip).properties(
+    chart = alt.layer(band, series, v_rule, h_rule, tooltip).properties(
         width='container', height=400
     )
-    chart = chart.configure_axis(
-        labelColor='white', titleColor='white'
-    ).configure_legend(
-        labelColor='white', titleColor='white'
-    )
+    chart = chart.configure_axis(labelColor='white', titleColor='white')
+    chart = chart.configure_legend(labelColor='white', titleColor='white')
     st.altair_chart(chart, use_container_width=True)
 
     # Main news
