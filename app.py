@@ -18,7 +18,9 @@ def fetch_price_data(symbol: str, months: int) -> pd.DataFrame:
         ticker += '.us'
     end_dt = datetime.now()
     start_dt = end_dt - timedelta(days=months * 30)
-    url = f"https://stooq.com/q/d/l/?s={ticker}&d1={start_dt.strftime('%Y%m%d')}&d2={end_dt.strftime('%Y%m%d')}&i=d"
+    url = (f"https://stooq.com/q/d/l/?s={ticker}"
+           f"&d1={start_dt.strftime('%Y%m%d')}"
+           f"&d2={end_dt.strftime('%Y%m%d')}&i=d")
     try:
         r = requests.get(url, timeout=10)
         df = pd.read_csv(StringIO(r.text), parse_dates=['Date'], index_col='Date')
@@ -50,18 +52,21 @@ def fetch_financials(symbol: str):
 
 # --- Fetch news and sentiment via Google News RSS ---
 def fetch_news_and_sentiment(symbol: str, count: int = 5):
-    url = f"https://news.google.com/rss/search?q={symbol}%20stock&hl=en-US&gl=US&ceid=US:en"
     results, avg_sent = [], 0.0
     try:
-        r = requests.get(url, timeout=10)
+        r = requests.get(
+            f"https://news.google.com/rss/search?q={symbol}%20stock&hl=en-US&gl=US&ceid=US:en",
+            timeout=10
+        )
         root = ET.fromstring(r.content)
         items = root.findall('.//item')[:count]
         analyzer = SentimentIntensityAnalyzer()
         for it in items:
-            title = it.find('title').text
-            link = it.find('link').text
-            score = analyzer.polarity_scores(title)['compound']
-            results.append({'title': title, 'link': link, 'sentiment': score})
+            title = it.find('title').text or ''
+            link = it.find('link').text or ''
+            if title and link:
+                score = analyzer.polarity_scores(title)['compound']
+                results.append({'title': title, 'link': link, 'sentiment': score})
         if results:
             avg_sent = np.mean([r['sentiment'] for r in results])
     except:
@@ -92,15 +97,15 @@ st.sidebar.title("Controls")
 symbol = st.sidebar.text_input("Ticker", "AAPL").upper()
 months = st.sidebar.slider("History (months)", 1, 24, 6)
 sims = st.sidebar.slider("Monte Carlo Sims", 100, 5000, 1000)
-others = st.sidebar.multiselect("Other tickers for news", ["MSFT","AMZN","GOOG","TSLA"], default=["MSFT","AMZN"])
+others = st.sidebar.multiselect("Other tickers for news",
+                               ["MSFT","AMZN","GOOG","TSLA"], default=["MSFT","AMZN"])
 
 if st.sidebar.button("Run Prediction"):
+    # Fetch data
     df = fetch_price_data(symbol, months)
     if df.empty:
         st.error(f"No data for {symbol}")
         st.stop()
-
-    # Fundamentals & sentiment
     revenue, next_earn = fetch_financials(symbol)
     news_list, news_sent = fetch_news_and_sentiment(symbol)
 
@@ -108,14 +113,14 @@ if st.sidebar.button("Run Prediction"):
     df['MA20'] = df['Close'].rolling(20).mean()
     df['MA50'] = df['Close'].rolling(50).mean()
 
-    # Monte Carlo params
+    # Monte Carlo parameters
     log_ret = np.log(df.Close / df.Close.shift(1)).dropna()
     mu = log_ret.mean() * 252 + news_sent * 0.1
     sigma = log_ret.std() * np.sqrt(252)
     S0 = df.Close.iloc[-1]
     days = 30
 
-    # Simulate
+    # Simulate paths
     paths = monte_carlo(S0, mu, sigma, days, sims)
     median = np.median(paths, axis=0)
     p10 = np.percentile(paths, 10, axis=0)
@@ -123,13 +128,7 @@ if st.sidebar.button("Run Prediction"):
     up5 = (paths[:, -1] > S0 * 1.05).mean() * 100
     down5 = (paths[:, -1] < S0 * 0.95).mean() * 100
     bias = up5 - down5
-    rec = (
-        'Strong Buy' if bias > 40 else
-        'Buy' if bias > 20 else
-        'Hold' if bias > -20 else
-        'Sell' if bias > -40 else
-        'Strong Sell'
-    )
+    rec = ('Strong Buy' if bias > 40 else 'Buy' if bias > 20 else 'Hold' if bias > -20 else 'Sell' if bias > -40 else 'Strong Sell')
 
     # Header display
     st.markdown(f"## {symbol} — {rec} ({bias:.1f}% bias)")
@@ -151,39 +150,46 @@ if st.sidebar.button("Run Prediction"):
         'P90': np.concatenate([[np.nan] * len(df), p90])
     })
 
-    # Legend via fold
-    # Dynamic padding: 10% of range
-    rng = y_max - y_min
-    pad = rng * 0.1
-    y_scale = alt.Scale(domain=[y_min - pad, y_max + pad])
-    lines = chart_df.melt('date', ['Price', 'MA20', 'MA50', 'Forecast'], var_name='Series', value_name='Value')
-
-    # Y scale domain
+    # Compute dynamic y-domain with padding
     y_min = np.nanmin([chart_df['P10'].dropna().min(), df.Close.min()])
     y_max = np.nanmax([chart_df['P90'].dropna().max(), df.Close.max()])
-        # Add $10 padding to top and bottom of y-axis
-    y_scale = alt.Scale(domain=[y_min - 10, y_max + 10])
+    rng = y_max - y_min
+    pad = 0.1 * rng
+    y_scale = alt.Scale(domain=[y_min - pad, y_max + pad])
 
-    # Crosshair and tooltip
+    # Melt for legend
+    lines = chart_df.melt('date', ['Price', 'MA20', 'MA50', 'Forecast'], var_name='Series', value_name='Value')
+
+    # Selection for crosshair
     sel = alt.selection_single(fields=['date'], nearest=True, on='mouseover', empty='none')
+
     base = alt.Chart(lines).encode(x='date:T')
-    band = alt.Chart(chart_df).mark_area(color='#ff7f0e', opacity=0.2).encode(x='date:T', y='P10:Q', y2='P90:Q')
-    chart_lines = base.mark_line().encode(
+    band = alt.Chart(chart_df).mark_area(color='#ff7f0e', opacity=0.2).encode(
+        x='date:T', y='P10:Q', y2='P90:Q')
+    series = base.mark_line().encode(
         y=alt.Y('Value:Q', scale=y_scale),
-        color='Series:N'
+        color=alt.Color('Series:N', scale=alt.Scale(domain=['Price','MA20','MA50','Forecast'],
+                                                  range=['#1f77b4','#2ca02c','#d62728','#ff7f0e'])),
+        strokeDash=alt.condition(
+            alt.datum.Series=='MA20', alt.value([5,5]),
+            alt.condition(alt.datum.Series=='MA50', alt.value([2,2]), alt.value([ ]))
+        ),
+        strokeWidth=alt.condition(alt.datum.Series=='Forecast', alt.value(2), alt.value(1.5))
     )
     rule = base.mark_rule(color='white').encode(opacity=alt.condition(sel, alt.value(1), alt.value(0))).add_selection(sel)
     tooltip = base.mark_point(size=0).encode(
         opacity=alt.value(0),
-        tooltip=[alt.Tooltip('date:T', title='Date'), alt.Tooltip('Value:Q', title='Value'), alt.Tooltip('Series:N', title='Series')]
+        tooltip=[alt.Tooltip('date:T', title='Date'),
+                 alt.Tooltip('Value:Q', title='Value'),
+                 alt.Tooltip('Series:N', title='Series')]
     ).add_selection(sel)
 
-    chart = alt.layer(band, chart_lines, rule, tooltip).properties(width='container', height=300)
+    chart = alt.layer(band, series, rule, tooltip).properties(width='container', height=400)
     chart = chart.configure_axis(labelColor='white', titleColor='white')
     chart = chart.configure_legend(labelColor='white', titleColor='white')
     st.altair_chart(chart, use_container_width=True)
 
-    # News for main symbol
+    # Main news
     st.markdown(f"## Recent News for {symbol}")
     if news_list:
         for item in news_list:
@@ -191,7 +197,7 @@ if st.sidebar.button("Run Prediction"):
     else:
         st.write("No recent news available.")
 
-    # News for others
+    # News for other tickers
     st.markdown("## News for Others")
     for o in others:
         st.markdown(f"### {o}")
